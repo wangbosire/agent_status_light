@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -44,7 +45,10 @@ impl LogEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogEntry {
-    /// Unix epoch 毫秒时间戳，避免引入额外时间格式化依赖。
+    /// 面向用户排障的本地时间，格式为 YYYY-MM-DD HH:mm:ss。
+    #[serde(default)]
+    pub time: String,
+    /// Unix epoch 毫秒时间戳，用于排序和兼容旧日志。
     pub ts_ms: u64,
     /// 日志等级，例如 info/warn/error。
     pub level: String,
@@ -95,10 +99,12 @@ pub fn emit(
 fn record_to_cache(entries: &mut Vec<LogEntry>, event: LogEvent) {
     // worker 启动时已经把最近日志读入内存，这里只维护内存缓存。
     // 每次更新后刷新整个小文件，避免追加后再做倒序整理的复杂度。
+    let ts_ms = now_ms();
     entries.insert(
         0,
         LogEntry {
-            ts_ms: now_ms(),
+            time: format_log_time(ts_ms),
+            ts_ms,
             level: event.level,
             event: event.event,
             message: event.message,
@@ -139,7 +145,7 @@ pub fn print_recent(limit: usize) -> Result<()> {
     for entry in entries {
         println!(
             "{} [{}] {} - {}",
-            entry.ts_ms, entry.level, entry.event, entry.message
+            entry.time, entry.level, entry.event, entry.message
         );
     }
 
@@ -166,7 +172,12 @@ fn read_all(paths: &AppPaths) -> Result<Vec<LogEntry>> {
             continue;
         }
         match serde_json::from_str::<LogEntry>(line) {
-            Ok(entry) => entries.push(entry),
+            Ok(mut entry) => {
+                if entry.time.is_empty() {
+                    entry.time = format_log_time(entry.ts_ms);
+                }
+                entries.push(entry);
+            }
             Err(err) => eprintln!("warning: skipped invalid log line: {err}"),
         }
     }
@@ -183,4 +194,14 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn format_log_time(ts_ms: u64) -> String {
+    let ts_ms = i64::try_from(ts_ms).unwrap_or(i64::MAX);
+    Local
+        .timestamp_millis_opt(ts_ms)
+        .single()
+        .unwrap_or_else(Local::now)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
