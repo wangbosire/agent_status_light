@@ -149,7 +149,7 @@ pub enum Commands {
 
     /// 为指定 agent 安装可直接使用的 Hook 配置。
     #[command(
-        long_about = "为 Codex、Cursor 或 Claude 安装可直接使用的 AgentStatusLight Hook 配置。\n\n不填写 --dir 时安装到用户全局配置：\n  Codex:  ~/.codex/hooks.json\n  Cursor: ~/.cursor/hooks.json\n  Claude: ~/.claude/settings.json\n\n填写 --dir 时安装到项目级配置：\n  Codex:  <dir>/.codex/hooks.json\n  Cursor: <dir>/.cursor/hooks.json\n  Claude: <dir>/.claude/settings.json\n\n安装时会复制当前可执行文件到 AgentStatusLight 自己的安装目录，Hook 会引用这个稳定路径。",
+        long_about = "为 Codex、Cursor 或 Claude 安装可直接使用的 AgentStatusLight Hook 配置。\n\n不填写 --dir 时安装到用户全局配置：\n  Codex:  ~/.codex/hooks.json\n  Cursor: ~/.cursor/hooks.json\n  Claude: ~/.claude/settings.json\n\n填写 --dir 时安装到项目级配置：\n  Codex:  <dir>/.codex/hooks.json\n  Cursor: <dir>/.cursor/hooks.json\n  Claude: <dir>/.claude/settings.json\n\n安装时会把当前 AgentStatusLight 可执行文件复制到固定目录的 bin 下，Hook 会引用这份稳定副本，避免用户删除解压包后失效。固定目录：macOS/Linux 为 ~/.agent-status-light，Windows 为 C:\\.agent-status-light。",
         after_help = "示例：\n  agent_status_light install cursor\n  agent_status_light install codex\n  agent_status_light install claude\n  agent_status_light install cursor --dir .\n\n说明：\n  重复执行 install 是安全的，会先清理旧的 AgentStatusLight Hook 条目，再写入新的配置。"
     )]
     Install {

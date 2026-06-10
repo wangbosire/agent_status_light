@@ -1,24 +1,21 @@
 //! 路径和运行时文件管理。
 //!
-//! 全局 runtime 始终放在用户配置目录中，项目级 install 只影响 hook 安装产物。
-//! 这保证多个项目可以共用同一个 daemon 和同一个 ESP32 灯，而不是每个项目启动一个服务。
+//! AgentStatusLight 是一个单文件命令。runtime 和安装清单统一放在固定的
+//! `.agent-status-light` 目录中，避免把另一份可执行文件复制到系统配置目录。
 
 use std::{
-    fs,
+    env, fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow};
-use directories::BaseDirs;
 use uuid::Uuid;
 
 pub const IPC_PORT: u16 = 47_631;
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
-    /// 用户级配置目录。未传 `--dir` 的 install/uninstall 也会使用这个目录。
-    pub config_dir: PathBuf,
     /// daemon 运行时目录，保存 pid、日志、IPC 信息和 token。
     pub runtime_dir: PathBuf,
     /// daemon pid 文件，用于 status 和 stop --force。
@@ -34,11 +31,9 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    /// 解析用户级全局配置目录和 runtime 文件路径。
+    /// 解析 AgentStatusLight 状态目录和 runtime 文件路径。
     pub fn load() -> Result<Self> {
-        let base_dirs =
-            BaseDirs::new().ok_or_else(|| anyhow!("failed to resolve user directories"))?;
-        let config_dir = base_dirs.config_dir().join("agent-status-light");
+        let config_dir = default_app_root()?;
         let runtime_dir = config_dir.join("runtime");
 
         Ok(Self {
@@ -47,7 +42,6 @@ impl AppPaths {
             events_file: runtime_dir.join("events.jsonl"),
             ipc_file: runtime_dir.join("ipc.json"),
             token_file: runtime_dir.join("token"),
-            config_dir,
             runtime_dir,
         })
     }
@@ -117,11 +111,18 @@ impl AppPaths {
 
 /// 计算 install/uninstall 的目标目录。
 pub fn install_root(dir: Option<&Path>) -> Result<PathBuf> {
-    // 传入 --dir 时，安装产物必须落在项目内，方便项目自包含。
-    if let Some(dir) = dir {
-        return Ok(dir.join(".agent-status-light"));
-    }
+    // `dir` 只影响目标 Agent 的 Hook 配置位置；AgentStatusLight 自己的文件始终放在固定目录。
+    let _ = dir;
+    default_app_root()
+}
 
-    // 不传 --dir 时使用全局配置目录，适合用户级 Hook 配置。
-    Ok(AppPaths::load()?.config_dir)
+#[cfg(windows)]
+fn default_app_root() -> Result<PathBuf> {
+    Ok(PathBuf::from(r"C:\.agent-status-light"))
+}
+
+#[cfg(not(windows))]
+fn default_app_root() -> Result<PathBuf> {
+    let home = env::var_os("HOME").ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    Ok(PathBuf::from(home).join(".agent-status-light"))
 }

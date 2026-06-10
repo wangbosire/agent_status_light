@@ -1,0 +1,160 @@
+{
+  "hooks": {
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode yellow --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode thinking --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode yellow --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "permission_prompt|elicitation_dialog"
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode error --source claude --session auto --ttl 300 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode yellow --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode success --source claude --session auto --ttl 30 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode error --source claude --session auto --ttl 300 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode busy --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode ai --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "Write|Edit|MultiEdit"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode green --source claude --session auto --ttl 120 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode success --source claude --session auto --ttl 30 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode error --source claude --session auto --ttl 300 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode thinking --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/bytedance/.agent-status-light/bin/agent_status_light send --mode thinking --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

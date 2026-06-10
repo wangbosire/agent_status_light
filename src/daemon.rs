@@ -32,7 +32,7 @@ use crate::{
     ipc::{self, IpcRequest, IpcResponse},
     log_store::{self, LogSender},
     modes,
-    status_priority::{self, DEFAULT_SESSION, MANUAL_SOURCE, StatusPriority},
+    status_priority::{self, MANUAL_SOURCE, StatusPriority},
 };
 
 /// 根据参数选择后台启动或前台运行。
@@ -52,14 +52,31 @@ pub async fn send_mode(
     quiet: bool,
     strict: bool,
 ) -> Result<()> {
+    let hook_input = read_hook_input_if_needed(session);
+    let hook_value = hook_input
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.trim()).ok());
+    let mode = resolve_mode_for_hook_input(source, mode, hook_value.as_ref());
+
     // 先在 CLI 客户端侧做 mode 校验，避免无效请求进入 IPC。
-    let Some(mode) = modes::normalize_mode(mode) else {
+    let Some(mode) = modes::normalize_mode(&mode) else {
         bail!(
             "invalid mode {mode:?}; valid modes: {}",
             modes::valid_modes_csv()
         );
     };
-    let source_key = resolve_source_key(source, session);
+    let source_key = resolve_source_key(source, session, hook_value.as_ref());
+
+    send_mode_to_source_key(&mode, &source_key, ttl_seconds, quiet, strict).await
+}
+
+async fn send_mode_to_source_key(
+    mode: &str,
+    source_key: &str,
+    ttl_seconds: Option<u64>,
+    quiet: bool,
+    strict: bool,
+) -> Result<()> {
     let ttl_seconds = normalize_ttl_seconds(ttl_seconds)?;
 
     let paths = AppPaths::load()?;
@@ -69,8 +86,8 @@ pub async fn send_mode(
     match ipc::request(
         &paths,
         "send",
-        Some(&mode),
-        Some(&source_key),
+        Some(mode),
+        Some(source_key),
         ttl_seconds,
         false,
         Duration::from_secs(1),
@@ -110,8 +127,8 @@ pub async fn send_mode(
     match ipc::request(
         &paths,
         "send",
-        Some(&mode),
-        Some(&source_key),
+        Some(mode),
+        Some(source_key),
         ttl_seconds,
         false,
         Duration::from_secs(2),
@@ -160,9 +177,16 @@ fn normalize_ttl_seconds(ttl_seconds: Option<u64>) -> Result<Option<u64>> {
     }
 }
 
-fn resolve_source_key(source: &str, session: &str) -> String {
+fn resolve_source_key(
+    source: &str,
+    session: &str,
+    hook_input: Option<&serde_json::Value>,
+) -> String {
     let session = if session.trim().eq_ignore_ascii_case("auto") {
-        read_auto_session().unwrap_or_else(|| DEFAULT_SESSION.to_owned())
+        let Some(session) = hook_input.and_then(extract_session_from_hook_value) else {
+            return status_priority::normalize_source(source);
+        };
+        session
     } else {
         status_priority::normalize_session(session)
     };
@@ -170,7 +194,11 @@ fn resolve_source_key(source: &str, session: &str) -> String {
     status_priority::source_key(source, &session)
 }
 
-fn read_auto_session() -> Option<String> {
+fn read_hook_input_if_needed(session: &str) -> Option<String> {
+    if !session.trim().eq_ignore_ascii_case("auto") {
+        return None;
+    }
+
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return None;
@@ -178,9 +206,14 @@ fn read_auto_session() -> Option<String> {
 
     let mut raw = String::new();
     stdin.lock().read_to_string(&mut raw).ok()?;
-    extract_session_from_hook_input(&raw)
+    if raw.trim().is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
 }
 
+#[cfg(test)]
 fn extract_session_from_hook_input(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -188,8 +221,12 @@ fn extract_session_from_hook_input(raw: &str) -> Option<String> {
     }
 
     let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    extract_session_from_hook_value(&value)
+}
+
+fn extract_session_from_hook_value(value: &serde_json::Value) -> Option<String> {
     find_string_field(
-        &value,
+        value,
         &[
             "session_id",
             "sessionId",
@@ -212,7 +249,7 @@ fn extract_session_from_hook_input(raw: &str) -> Option<String> {
     .map(status_priority::normalize_session)
     .or_else(|| {
         find_string_field(
-            &value,
+            value,
             &[
                 "cwd",
                 "workspace",
@@ -231,6 +268,175 @@ fn extract_session_from_hook_input(raw: &str) -> Option<String> {
         )
         .map(|stable_text| format!("hash-{}", stable_hash(stable_text)))
     })
+}
+
+fn resolve_mode_for_hook_input(
+    source: &str,
+    requested_mode: &str,
+    hook_input: Option<&serde_json::Value>,
+) -> String {
+    let Some(value) = hook_input else {
+        return requested_mode.to_owned();
+    };
+
+    match AgentSource::from_source(source) {
+        AgentSource::Codex => codex_hook_mode(requested_mode, value),
+        AgentSource::Cursor => cursor_hook_mode(requested_mode, value),
+        AgentSource::Claude => claude_hook_mode(requested_mode, value),
+        AgentSource::Other => requested_mode.to_owned(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentSource {
+    Codex,
+    Cursor,
+    Claude,
+    Other,
+}
+
+impl AgentSource {
+    fn from_source(source: &str) -> Self {
+        match status_priority::normalize_source(source).as_str() {
+            "codex" => Self::Codex,
+            "cursor" => Self::Cursor,
+            "claude" => Self::Claude,
+            _ => Self::Other,
+        }
+    }
+}
+
+fn codex_hook_mode(requested_mode: &str, value: &serde_json::Value) -> String {
+    let Some(event) = normalized_hook_event_name(value) else {
+        return requested_mode.to_owned();
+    };
+
+    if hook_output_failed(value, &event) {
+        return "error".to_owned();
+    }
+
+    if requested_mode.eq_ignore_ascii_case("success") && event == "posttooluse" {
+        return mode_for_completed_tool(value).to_owned();
+    }
+
+    requested_mode.to_owned()
+}
+
+fn cursor_hook_mode(requested_mode: &str, value: &serde_json::Value) -> String {
+    let event = normalized_hook_event_name(value).or_else(|| {
+        requested_mode
+            .eq_ignore_ascii_case("success")
+            .then(|| inferred_completion_event_name(value))
+            .flatten()
+    });
+    let Some(event) = event else {
+        return requested_mode.to_owned();
+    };
+
+    if hook_output_failed(value, &event) {
+        return "error".to_owned();
+    }
+
+    if requested_mode.eq_ignore_ascii_case("success") && cursor_completion_event(&event) {
+        return "busy".to_owned();
+    }
+
+    requested_mode.to_owned()
+}
+
+fn claude_hook_mode(requested_mode: &str, value: &serde_json::Value) -> String {
+    let Some(event) = normalized_hook_event_name(value) else {
+        return requested_mode.to_owned();
+    };
+
+    if hook_output_failed(value, &event) {
+        return "error".to_owned();
+    }
+
+    if requested_mode.eq_ignore_ascii_case("thinking") && event == "elicitationresult" {
+        return "thinking".to_owned();
+    }
+
+    if requested_mode.eq_ignore_ascii_case("success") && event == "posttooluse" {
+        return mode_for_completed_tool(value).to_owned();
+    }
+
+    requested_mode.to_owned()
+}
+
+fn normalized_hook_event_name(value: &serde_json::Value) -> Option<String> {
+    find_string_field(
+        value,
+        &[
+            "hook_event_name",
+            "hookEventName",
+            "event_name",
+            "eventName",
+            "event",
+            "type",
+        ],
+    )
+    .map(normalize_event_name)
+}
+
+fn inferred_completion_event_name(value: &serde_json::Value) -> Option<String> {
+    find_number_field(
+        value,
+        &["exit_code", "exitCode", "status_code", "statusCode"],
+    )
+    .map(|_| "aftercommand".to_owned())
+}
+
+fn normalize_event_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn hook_output_failed(value: &serde_json::Value, event: &str) -> bool {
+    event.contains("failure")
+        || event.contains("denied")
+        || find_nonzero_number_field(
+            value,
+            &["exit_code", "exitCode", "status_code", "statusCode"],
+        )
+        || find_false_bool_field(value, &["success", "ok"])
+        || find_string_field(value, &["error", "error_message", "errorMessage"])
+            .is_some_and(|error| !error.trim().is_empty())
+        || find_string_field(value, &["status", "action"]).is_some_and(|status| {
+            matches!(
+                normalize_event_name(status).as_str(),
+                "error"
+                    | "failed"
+                    | "failure"
+                    | "denied"
+                    | "aborted"
+                    | "decline"
+                    | "cancel"
+                    | "cancelled"
+                    | "canceled"
+            )
+        })
+}
+
+fn cursor_completion_event(event: &str) -> bool {
+    matches!(
+        event,
+        "aftershellexecution" | "aftercommand" | "shellcommandcompleted"
+    )
+}
+
+fn mode_for_completed_tool(value: &serde_json::Value) -> &'static str {
+    match find_string_field(value, &["tool_name", "toolName", "tool", "name"])
+        .map(normalize_event_name)
+        .as_deref()
+    {
+        Some("bash" | "shell" | "terminal" | "command") => "busy",
+        Some("write" | "edit" | "multiedit" | "applypatch") => "ai",
+        _ => "thinking",
+    }
 }
 
 fn find_string_field<'a>(value: &'a serde_json::Value, names: &[&str]) -> Option<&'a str> {
@@ -252,6 +458,50 @@ fn find_string_field<'a>(value: &'a serde_json::Value, names: &[&str]) -> Option
             .iter()
             .find_map(|child| find_string_field(child, names)),
         _ => None,
+    }
+}
+
+fn find_nonzero_number_field(value: &serde_json::Value, names: &[&str]) -> bool {
+    find_number_field(value, names).is_some_and(|candidate| candidate != 0)
+}
+
+fn find_number_field(value: &serde_json::Value, names: &[&str]) -> Option<i64> {
+    match value {
+        serde_json::Value::Object(object) => {
+            for name in names {
+                if let Some(candidate) = object.get(*name).and_then(serde_json::Value::as_i64) {
+                    return Some(candidate);
+                }
+            }
+
+            object
+                .values()
+                .find_map(|child| find_number_field(child, names))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|child| find_number_field(child, names)),
+        _ => None,
+    }
+}
+
+fn find_false_bool_field(value: &serde_json::Value, names: &[&str]) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            for name in names {
+                if object.get(*name).and_then(serde_json::Value::as_bool) == Some(false) {
+                    return true;
+                }
+            }
+
+            object
+                .values()
+                .any(|child| find_false_bool_field(child, names))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|child| find_false_bool_field(child, names)),
+        _ => false,
     }
 }
 
@@ -809,6 +1059,92 @@ mod tests {
     fn extracts_alternate_session_fields() {
         let session = extract_session_from_hook_input(r#"{"tabId":"TAB-9"}"#);
         assert_eq!(session.as_deref(), Some("tab-9"));
+    }
+
+    #[test]
+    fn auto_session_without_hook_session_falls_back_to_source_root() {
+        let value = serde_json::json!({"hook_event_name": "Stop"});
+
+        assert_eq!(resolve_source_key("claude", "auto", Some(&value)), "claude");
+    }
+
+    #[test]
+    fn hook_tool_success_keeps_agent_in_working_state() {
+        let claude_bash = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": {"success": true}
+        });
+        let codex_patch = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "apply_patch",
+            "tool_response": {"success": true}
+        });
+
+        assert_eq!(
+            resolve_mode_for_hook_input("claude", "success", Some(&claude_bash)),
+            "busy"
+        );
+        assert_eq!(
+            resolve_mode_for_hook_input("codex", "success", Some(&codex_patch)),
+            "ai"
+        );
+    }
+
+    #[test]
+    fn cursor_shell_completion_uses_output_status() {
+        let ok = serde_json::json!({
+            "exitCode": 0
+        });
+        let failed = serde_json::json!({
+            "exitCode": 1
+        });
+
+        assert_eq!(
+            resolve_mode_for_hook_input("cursor", "success", Some(&ok)),
+            "busy"
+        );
+        assert_eq!(
+            resolve_mode_for_hook_input("cursor", "success", Some(&failed)),
+            "error"
+        );
+    }
+
+    #[test]
+    fn stop_remains_the_success_boundary() {
+        let stop = serde_json::json!({
+            "hook_event_name": "Stop"
+        });
+
+        assert_eq!(
+            resolve_mode_for_hook_input("claude", "success", Some(&stop)),
+            "success"
+        );
+    }
+
+    #[test]
+    fn user_decline_from_blocking_panel_clears_alarm_as_error() {
+        let declined = serde_json::json!({
+            "hook_event_name": "ElicitationResult",
+            "action": "decline"
+        });
+
+        assert_eq!(
+            resolve_mode_for_hook_input("claude", "thinking", Some(&declined)),
+            "error"
+        );
+    }
+
+    #[test]
+    fn unknown_source_does_not_infer_hook_mode() {
+        let shell_output = serde_json::json!({
+            "exitCode": 0
+        });
+
+        assert_eq!(
+            resolve_mode_for_hook_input("manual", "success", Some(&shell_output)),
+            "success"
+        );
     }
 
     #[test]

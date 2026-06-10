@@ -69,9 +69,12 @@ impl StatusPriority {
             if source == MANUAL_SOURCE {
                 self.active.clear();
             } else {
-                self.active.remove(&source);
+                self.remove_source_entries(&source);
             }
         } else {
+            if is_source_root_key(&source) {
+                self.remove_source_entries(&source);
+            }
             self.active.insert(
                 source,
                 ActiveStatus {
@@ -155,6 +158,16 @@ impl StatusPriority {
             })
             .map(|status| status.mode.as_str())
     }
+
+    fn remove_source_entries(&mut self, source: &str) {
+        if is_source_root_key(source) {
+            let session_prefix = format!("{source}:");
+            self.active
+                .retain(|key, _| key != source && !key.starts_with(&session_prefix));
+        } else {
+            self.active.remove(source);
+        }
+    }
 }
 
 pub fn normalize_source(source: &str) -> String {
@@ -187,20 +200,25 @@ pub fn source_key(source: &str, session: &str) -> String {
     }
 }
 
+fn is_source_root_key(source: &str) -> bool {
+    !source.contains(':')
+}
+
 /// mode 优先级。数值越大越应该优先展示。
 ///
 /// 设计意图：
-/// - `alarm/error/yellow` 代表异常或等待人工处理，必须压过普通运行状态。
-/// - `busy/ai/thinking` 代表 agent 正在工作，压过短暂的 success。
+/// - `alarm/error` 代表异常或严重阻塞，必须压过普通运行状态。
+/// - `busy/ai` 代表 agent 正在执行工具，应压过“等待用户”的 yellow。
+/// - `yellow/thinking` 代表等待或思考，压过短暂的 success。
 /// - `success/green/demo/traffic` 是收尾或展示状态，优先级较低。
 /// - `off` 不进入活跃状态池，只用于清除 source 或全局关灯。
 pub fn mode_priority(mode: &str) -> u8 {
     match mode {
         "alarm" => 100,
         "error" => 90,
-        "yellow" => 80,
         "busy" => 70,
         "ai" => 60,
+        "yellow" => 55,
         "thinking" => 50,
         "success" => 40,
         "red" => 35,
@@ -257,6 +275,22 @@ mod tests {
     }
 
     #[test]
+    fn working_status_beats_waiting_user_status() {
+        let start = Instant::now();
+        let mut priority = StatusPriority::new();
+
+        assert_eq!(
+            priority.apply_update("claude", "yellow", None, start),
+            Some("yellow".to_owned())
+        );
+        assert_eq!(
+            priority.apply_update("cursor", "busy", None, start),
+            Some("busy".to_owned())
+        );
+        assert_eq!(priority.apply_update("codex", "success", None, start), None);
+    }
+
+    #[test]
     fn source_off_only_clears_that_source() {
         let start = Instant::now();
         let mut priority = StatusPriority::new();
@@ -308,6 +342,42 @@ mod tests {
             priority.apply_update("cursor:session-b", "off", None, start),
             Some("busy".to_owned())
         );
+    }
+
+    #[test]
+    fn source_root_update_clears_old_sessions_for_that_source() {
+        let start = Instant::now();
+        let mut priority = StatusPriority::new();
+
+        assert_eq!(
+            priority.apply_update("claude:session-a", "yellow", None, start),
+            Some("yellow".to_owned())
+        );
+        assert_eq!(
+            priority.apply_update("claude", "success", None, start),
+            Some("success".to_owned())
+        );
+
+        let snapshot = priority.snapshot(start);
+        assert_eq!(snapshot.sources.len(), 1);
+        assert_eq!(snapshot.sources[0].source, "claude");
+        assert_eq!(snapshot.sources[0].mode, "success");
+    }
+
+    #[test]
+    fn source_root_off_clears_all_sessions_for_that_source() {
+        let start = Instant::now();
+        let mut priority = StatusPriority::new();
+
+        priority.apply_update("claude:session-a", "yellow", None, start);
+        priority.apply_update("claude:session-b", "busy", None, start);
+        priority.apply_update("cursor:session-a", "busy", None, start);
+
+        assert_eq!(priority.apply_update("claude", "off", None, start), None);
+
+        let snapshot = priority.snapshot(start);
+        assert_eq!(snapshot.sources.len(), 1);
+        assert_eq!(snapshot.sources[0].source, "cursor:session-a");
     }
 
     #[test]

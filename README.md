@@ -295,13 +295,17 @@ agent_status_light status --verbose
 | Cursor | `~/.cursor/hooks.json`    | `<dir>/.cursor/hooks.json`  |
 | Claude | `~/.claude/settings.json` | `<dir>/.claude/settings.json` |
 
-安装后还会在 AgentStatusLight 自己的安装目录中创建辅助文件：
+安装后还会在 AgentStatusLight 自己的固定目录中创建辅助文件：
+
+- macOS / Linux: `~/.agent-status-light`
+- Windows: `C:\.agent-status-light`
 
 ```text
 .agent-status-light/
-├─ bin/ # 存放 Hook 调用的 agent_status_light 可执行文件副本
-├─ temp/ # 存放临时文件
+├─ bin/ # Hook 调用的 agent_status_light 稳定副本
+├─ runtime/ # daemon pid、日志、IPC 信息和 token
 └─ config.[codex/cursor/claude].json # 安装清单，卸载时用于判断是否可以删除空配置文件
+```
 ```
 
 macOS：

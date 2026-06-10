@@ -4,10 +4,12 @@
 //! 安装时只追加 AgentStatusLight 自己的 Hook 条目；卸载时也只移除命令中包含本工具
 //! `send --mode` 的条目，尽量不影响用户已有配置。
 
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, anyhow};
-use directories::BaseDirs;
 use serde_json::{Map, Value, json};
 
 use crate::cli::HookTarget;
@@ -24,10 +26,7 @@ const CURSOR_HOOK_VERSION: u64 = 1;
 pub fn target_config_path(target: HookTarget, dir: Option<&Path>) -> Result<PathBuf> {
     let base = match dir {
         Some(dir) => dir.to_path_buf(),
-        None => BaseDirs::new()
-            .ok_or_else(|| anyhow!("failed to resolve user directories"))?
-            .home_dir()
-            .to_path_buf(),
+        None => home_dir()?,
     };
 
     let path = match target {
@@ -37,6 +36,22 @@ pub fn target_config_path(target: HookTarget, dir: Option<&Path>) -> Result<Path
     };
 
     Ok(path)
+}
+
+fn home_dir() -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        return env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("failed to resolve user home directory"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("failed to resolve user home directory"))
+    }
 }
 
 /// 生成目标工具可直接写入配置文件的 Hook 片段。
@@ -146,17 +161,17 @@ fn codex_config(binary: &str) -> Value {
             "PermissionRequest": [
                 hook_group(
                     None,
-                    vec![codex_command(binary, "alarm", "codex", "AgentStatusLight: approval required")]
+                    vec![codex_command(binary, "yellow", "codex", "AgentStatusLight: approval required")]
                 )
             ],
             "PostToolUse": [
                 hook_group(
-                    Some("Bash|apply_patch"),
+                    None,
                     vec![codex_command(binary, "success", "codex", "AgentStatusLight: tool finished")]
                 )
             ],
             "Stop": [
-                hook_group(None, vec![plain_command(binary, "off", "codex")])
+                hook_group(None, vec![plain_command(binary, "success", "codex")])
             ]
         }
     })
@@ -173,7 +188,11 @@ fn cursor_config(binary: &str) -> Value {
             "beforeSubmitPrompt": [
                 cursor_command(binary, "thinking", "cursor")
             ],
+            "afterAgentResponse": [
+                cursor_matched_command(binary, "success", "cursor", "AgentResponse")
+            ],
             "preToolUse": [
+                cursor_matched_command(binary, "yellow", "cursor", "AskQuestion"),
                 cursor_matched_command(binary, "ai", "cursor", "Write|Edit|MultiEdit")
             ],
             "beforeShellExecution": [
@@ -183,10 +202,10 @@ fn cursor_config(binary: &str) -> Value {
                 cursor_matched_command(binary, "success", "cursor", ".*")
             ],
             "stop": [
-                cursor_stop_command(binary, "off", "cursor")
+                cursor_stop_command(binary, "success", "cursor")
             ],
             "sessionEnd": [
-                cursor_command(binary, "off", "cursor")
+                cursor_command(binary, "green", "cursor")
             ]
         }
     })
@@ -207,19 +226,34 @@ fn claude_config(binary: &str) -> Value {
                 hook_group(Some("Write|Edit|MultiEdit"), vec![plain_command(binary, "ai", "claude")])
             ],
             "PermissionRequest": [
-                hook_group(None, vec![plain_command(binary, "alarm", "claude")])
+                hook_group(None, vec![plain_command(binary, "yellow", "claude")])
+            ],
+            "PermissionDenied": [
+                hook_group(None, vec![plain_command(binary, "error", "claude")])
+            ],
+            "Elicitation": [
+                hook_group(None, vec![plain_command(binary, "yellow", "claude")])
+            ],
+            "ElicitationResult": [
+                hook_group(None, vec![plain_command(binary, "thinking", "claude")])
             ],
             "PostToolUse": [
-                hook_group(Some("Bash|Write|Edit|MultiEdit"), vec![plain_command(binary, "success", "claude")])
+                hook_group(None, vec![plain_command(binary, "success", "claude")])
+            ],
+            "PostToolUseFailure": [
+                hook_group(None, vec![plain_command(binary, "error", "claude")])
             ],
             "Notification": [
-                hook_group(None, vec![plain_command(binary, "alarm", "claude")])
+                hook_group(Some("permission_prompt|elicitation_dialog"), vec![plain_command(binary, "yellow", "claude")])
             ],
             "Stop": [
-                hook_group(None, vec![plain_command(binary, "off", "claude")])
+                hook_group(None, vec![plain_command(binary, "success", "claude")])
+            ],
+            "StopFailure": [
+                hook_group(None, vec![plain_command(binary, "error", "claude")])
             ],
             "SubagentStop": [
-                hook_group(None, vec![plain_command(binary, "success", "claude")])
+                hook_group(None, vec![plain_command(binary, "thinking", "claude")])
             ]
         }
     })
@@ -280,8 +314,8 @@ fn cursor_stop_command(binary: &str, mode: &str, source: &str) -> Value {
 fn command(binary: &str, mode: &str, source: &str) -> String {
     format!(
         "{} send --mode {mode} --source {} --session auto --ttl {} --quiet --hook-id agent-status-light",
-        shell_quote(binary),
-        shell_quote(source),
+        binary,
+        source,
         hook_ttl(mode)
     )
 }
@@ -294,15 +328,6 @@ fn hook_ttl(mode: &str) -> u64 {
         "success" => 30,
         "red" | "green" | "demo" | "traffic" => 2 * 60,
         _ => 60,
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    // Hook command 是一整段 shell 命令。这里集中处理路径空格，避免要求用户把二进制放进 PATH。
-    if cfg!(windows) {
-        format!("\"{}\"", value.replace('"', "\\\""))
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -414,7 +439,7 @@ mod tests {
         let config = render_config(HookTarget::Codex, "/tmp/agent_status_light");
 
         assert_event_command_contains(&config, "UserPromptSubmit", "--mode thinking");
-        assert_event_command_contains(&config, "PermissionRequest", "--mode alarm");
+        assert_event_command_contains(&config, "PermissionRequest", "--mode yellow");
         assert_event_command_contains(&config, "PostToolUse", "--mode success");
     }
 
@@ -422,8 +447,22 @@ mod tests {
     fn claude_hooks_cover_permission_approval() {
         let config = render_config(HookTarget::Claude, "/tmp/agent_status_light");
 
-        assert_event_command_contains(&config, "PermissionRequest", "--mode alarm");
-        assert_event_command_contains(&config, "Notification", "--mode alarm");
+        assert_event_command_contains(&config, "PermissionRequest", "--mode yellow");
+        assert_event_command_contains(&config, "Notification", "--mode yellow");
+    }
+
+    #[test]
+    fn hook_commands_are_not_shell_quoted() {
+        let hook_command = command(
+            "/tmp/agent-status-light/bin/agent_status_light",
+            "alarm",
+            "claude",
+        );
+
+        assert_eq!(
+            hook_command,
+            "/tmp/agent-status-light/bin/agent_status_light send --mode alarm --source claude --session auto --ttl 1800 --quiet --hook-id agent-status-light"
+        );
     }
 
     fn assert_event_command_contains(config: &Value, event: &str, expected: &str) {

@@ -1,7 +1,7 @@
 //! Hook 安装和卸载。
 //!
 //! `--dir` 存在时把 Hook 写入项目级 agent 配置；不传时写入用户全局 agent 配置。
-//! 二进制副本仍放在 AgentStatusLight 自己的安装目录中，Hook 配置只引用这个稳定路径。
+//! Hook 配置引用固定 `.agent-status-light/bin` 下的可执行文件副本，避免用户删除解压目录后失效。
 
 use std::{
     fs,
@@ -48,13 +48,10 @@ pub async fn install(target: HookTarget, dir: Option<&Path>) -> Result<()> {
     .await;
 
     let bin_dir = root.join("bin");
-    let temp_dir = root.join("temp");
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
-    fs::create_dir_all(&temp_dir)
-        .with_context(|| format!("failed to create {}", temp_dir.display()))?;
 
-    // 复制当前可执行文件，避免 Hook 依赖用户 PATH 中是否存在 agent_status_light。
+    // 复制当前可执行文件到固定目录，避免用户删除解压包后 Hook 路径失效。
     let binary = copy_current_binary(&bin_dir)?;
     let binary_for_hook = path_for_hook(&binary);
     let manifest_path = manifest_path(&root, target);
@@ -66,7 +63,7 @@ pub async fn install(target: HookTarget, dir: Option<&Path>) -> Result<()> {
     hooks::merge_config(&mut hook_config, fragment)?;
     write_json(&hook_config_path, &hook_config)?;
 
-    let config = InstallConfig {
+    let config: InstallConfig = InstallConfig {
         version: 1,
         target: target.as_str().to_owned(),
         install_root: root.display().to_string(),
@@ -165,7 +162,6 @@ pub async fn uninstall(target: HookTarget, dir: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// 把当前正在运行的可执行文件复制到安装目录，方便 Hook 使用稳定路径调用。
 fn copy_current_binary(bin_dir: &Path) -> Result<PathBuf> {
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
     let file_name = if cfg!(windows) {
